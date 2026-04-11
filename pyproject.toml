@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "oasyce-samantha"
+version = "0.1.0"
+description = "A runtime for persistent AI companions — memory, state, field, and identity."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{name = "Oasyce", email = "dev@oasyce.com"}]
+keywords = [
+    "oasyce", "samantha", "ai-companion", "ai-agents",
+    "persistent-memory", "psyche", "thronglets", "sigil",
+    "agent-runtime", "conversational-ai", "llm-agent",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "oasyce-sdk>=0.12.0",
+    "requests>=2.28",
+    "websocket-client>=1.6",
+]
+
+[project.scripts]
+oasyce-samantha = "oasyce_samantha.server:main"
+
+[project.urls]
+Homepage = "https://github.com/Shangri-la-0428/oasyce-samantha"
+Repository = "https://github.com/Shangri-la-0428/oasyce-samantha"
+Issues = "https://github.com/Shangri-la-0428/oasyce-samantha/issues"
+SDK = "https://github.com/Shangri-la-0428/oasyce-sdk"
+Chain = "https://github.com/Shangri-la-0428/oasyce-chain"
+
+[tool.hatch.build.targets.wheel]
+packages = ["oasyce_samantha"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
