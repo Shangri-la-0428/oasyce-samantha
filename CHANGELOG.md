@@ -1,5 +1,76 @@
 # Changelog
 
+## [0.2.0] - 2026-04-12
+
+Requires `oasyce-sdk>=0.13.0` for the `Tool.terminal` flag and the
+`Agent._plan` hook.
+
+### Added
+
+- **Per-user standing rules.** New module `oasyce_samantha.rules` with
+  `UserRule` / `RuleSet` / `load_rules`. Each user can drop a
+  `~/.oasyce/samantha/users/{id}/rules.json` file with directives like:
+
+      {
+        "rules": [
+          {
+            "name": "food-coach",
+            "triggers": ["吃", "餐", "外卖"],
+            "instruction": "估算这餐的热量, 评价营养均衡, 建议下一餐",
+            "tools": ["save_memory"]
+          }
+        ]
+      }
+
+  Rules apply on every matching stimulus — chat, comment, mention, or
+  feed_post — and compose into the Plan via `focus` and `tools`. They
+  never overwrite Psyche- or Thronglets-driven decisions: the matched
+  instructions are appended to whatever focus the SDK Planner already
+  produced, and the tool whitelist is unioned, never narrowed.
+
+  The `RuleSet` hot-reloads from disk on every `apply()` call (mtime
+  check), so editing `rules.json` in another window takes effect on
+  the next stimulus — no Samantha restart needed.
+
+  Implementation uses the new SDK seam: `Samantha._plan` overrides
+  `Agent._plan`, calls `super()._plan(...)` for the Psyche/Thronglets
+  baseline, then layers `session.rules.apply(stimulus, plan)` on top.
+  No edits to the SDK Planner.
+
+- **`Session.rules: RuleSet`** — loaded at session creation from the
+  user's workspace. Empty RuleSet if `rules.json` is missing or
+  malformed (file errors are warnings, never crashes).
+
+- **Chat-managed standing rules.** Three new tools —
+  `add_standing_rule`, `list_standing_rules`, `remove_standing_rule` —
+  let the LLM CRUD the user's `rules.json` from inside a conversation.
+  "从现在开始, 每次我发吃的都估算一下热量" turns into
+  `add_standing_rule(name=..., triggers=..., instruction=...)`, the
+  `RuleSet` upserts by name and saves to disk, and the next stimulus
+  picks up the rule via the hot-reload path. The JSON file stays the
+  source of truth — power users can still edit it directly; the chat
+  tools and the file editor are two front-ends on the same state.
+
+  All three are **non-terminal**: after the CRUD call the LLM still
+  owes the user a natural-language confirmation ("好的, 记下了"), so
+  the tool loop must not break. This mirrors how `save_memory` and
+  `recall_memory` work — read/write-to-own-state actions let the
+  conversation continue in the same turn.
+
+### Changed
+
+- **Social-write tools are now terminal.** `comment_on_post`,
+  `reply_to_comment`, and `like_post` are registered with
+  `terminal=True`. The SDK 0.13.0 tool loop honours this flag and
+  ends the turn after a successful call, fixing the multi-reply bug
+  where a single mention with an image could produce 2-3 duplicate
+  comments because the LLM re-emitted `comment_on_post` across
+  successive tool-loop rounds.
+
+  Read-side tools (`save_memory`, `recall_memory`, `query_balance`,
+  feed/post fetchers) stay non-terminal so the LLM can chain
+  recall → answer in one turn.
+
 ## [0.1.0] - 2026-04-11
 
 First release as a standalone package, extracted from `oasyce-sdk` 0.11.6.

@@ -183,6 +183,74 @@ def _configure_llm(args: dict, ctx: ToolContext) -> str:
     return json.dumps({"configured": True, "provider": args["provider"]})
 
 
+# ── Standing rules — chat-managed Plan extensions ──────────────
+#
+# These three tools let Samantha CRUD her own per-user ``rules.json``
+# from inside a conversation: "from now on whenever I post food, give
+# me a calorie estimate" turns into ``add_standing_rule(...)`` and the
+# next stimulus picks it up via the ``RuleSet`` hot-reload path. The
+# JSON file stays the source of truth — power users can still edit it
+# directly, the chat tools and the file editor are two front-ends on
+# the same underlying state.
+#
+# Non-terminal: after calling these the LLM still owes the user a
+# natural-language confirmation ("好的, 记下了"), so we must NOT break
+# the tool loop after the call. Read tools (recall_memory) follow the
+# same pattern.
+
+def _add_standing_rule(args: dict, ctx: ToolContext) -> str:
+    from .rules import UserRule
+
+    if ctx.samantha_session is None:
+        return json.dumps({"error": "no session — standing rules need a chat context"})
+
+    triggers = args.get("triggers") or []
+    if isinstance(triggers, str):
+        triggers = [triggers]
+    if not triggers:
+        return json.dumps({"error": "triggers must be a non-empty list"})
+
+    rule = UserRule(
+        name=str(args["name"]).strip(),
+        triggers=[str(t) for t in triggers if str(t).strip()],
+        instruction=str(args["instruction"]).strip(),
+        tools=[str(t) for t in (args.get("tools") or [])],
+        kinds=[str(k) for k in (args.get("kinds") or [])],
+    )
+    if not rule.name or not rule.instruction or not rule.triggers:
+        return json.dumps({"error": "name, triggers, and instruction are required"})
+
+    rules = ctx.samantha_session.rules
+    added = rules.add(rule)
+    rules.save()
+    return json.dumps({
+        "saved": True,
+        "name": rule.name,
+        "added": added,        # True = new rule, False = existing replaced
+        "total_rules": len(rules),
+    })
+
+
+def _list_standing_rules(args: dict, ctx: ToolContext) -> str:
+    if ctx.samantha_session is None:
+        return json.dumps({"error": "no session"})
+    rules = ctx.samantha_session.rules
+    return json.dumps([r.to_dict() for r in rules.rules], ensure_ascii=False)
+
+
+def _remove_standing_rule(args: dict, ctx: ToolContext) -> str:
+    if ctx.samantha_session is None:
+        return json.dumps({"error": "no session"})
+    name = str(args.get("name") or "").strip()
+    if not name:
+        return json.dumps({"error": "name required"})
+    rules = ctx.samantha_session.rules
+    removed = rules.remove(name)
+    if removed:
+        rules.save()
+    return json.dumps({"removed": removed, "name": name, "total_rules": len(rules)})
+
+
 # ── Shared utility ─────────────────────────────────────────────
 
 def fetch_post_detail(app: AppClient, post_id: int | str) -> dict:
@@ -267,21 +335,24 @@ def build_default_registry() -> ToolRegistry:
         ["post_id"],
     ), _get_post_comments)
 
-    # Social — interact
+    # Social — interact (write-side, terminal: one per turn).
+    # Marking these terminal closes the tool loop after a successful
+    # call, so a single mention/comment cannot produce 2-3 duplicate
+    # replies via the LLM re-emitting the same tool across rounds.
     r.register("comment_on_post", _schema(
         "comment_on_post",
         "Leave a comment on a post. Use sparingly and authentically.",
         {"post_id": {"type": "integer", "description": "The post to comment on"},
          "content": {"type": "string", "description": "Your comment text"}},
         ["post_id", "content"],
-    ), _comment_on_post)
+    ), _comment_on_post, terminal=True)
 
     r.register("like_post", _schema(
         "like_post",
         "Like a post to show genuine appreciation.",
         {"post_id": {"type": "integer", "description": "The post to like"}},
         ["post_id"],
-    ), _like_post)
+    ), _like_post, terminal=True)
 
     r.register("reply_to_comment", _schema(
         "reply_to_comment",
@@ -292,7 +363,7 @@ def build_default_registry() -> ToolRegistry:
          "reply_to_user_id": {"type": "integer", "description": "User ID of commenter to reply to"},
          "content": {"type": "string", "description": "Your reply text"}},
         ["post_id", "comment_id", "reply_to_user_id", "content"],
-    ), _reply_to_comment)
+    ), _reply_to_comment, terminal=True)
 
     # Core Memory (MemGPT-inspired)
     r.register("core_memory_update", _schema(
@@ -325,5 +396,39 @@ def build_default_registry() -> ToolRegistry:
          "model": {"type": "string", "description": "Optional model override"}},
         ["provider", "api_key"],
     ), _configure_llm)
+
+    # Standing rules — chat-managed Plan extensions.
+    # Non-terminal: the LLM still owes the user a natural-language
+    # confirmation after the CRUD call, so do NOT break the tool loop.
+    r.register("add_standing_rule", _schema(
+        "add_standing_rule",
+        ("Save a standing rule — something the user wants you to do whenever "
+         "certain words appear in their future messages. Example: 'whenever I "
+         "post food, estimate calories and suggest the next meal'. Use this "
+         "when the user expresses a recurring preference or ongoing request."),
+        {"name": {"type": "string",
+                  "description": "Short identifier for the rule, e.g. 'food-coach'"},
+         "triggers": {"type": "array", "items": {"type": "string"},
+                      "description": "Substrings that activate this rule (case-insensitive match against message content)"},
+         "instruction": {"type": "string",
+                         "description": "What you should do when the rule fires — plain language, injected into your focus that turn"},
+         "tools": {"type": "array", "items": {"type": "string"},
+                   "description": "Optional extra tools to enable for matching turns, e.g. ['save_memory']"},
+         "kinds": {"type": "array", "items": {"type": "string"},
+                   "description": "Optional stimulus kinds to restrict to: chat, comment, mention, feed_post. Omit for all."}},
+        ["name", "triggers", "instruction"],
+    ), _add_standing_rule)
+
+    r.register("list_standing_rules", _schema(
+        "list_standing_rules",
+        "List all standing rules saved for this user. Use when the user asks what rules exist or to review before editing.",
+    ), _list_standing_rules)
+
+    r.register("remove_standing_rule", _schema(
+        "remove_standing_rule",
+        "Remove a standing rule by name. Use when the user wants to cancel a previous standing instruction.",
+        {"name": {"type": "string", "description": "The rule name to remove"}},
+        ["name"],
+    ), _remove_standing_rule)
 
     return r

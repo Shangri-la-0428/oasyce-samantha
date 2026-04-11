@@ -38,6 +38,7 @@ from oasyce_sdk.agent.stimulus import Stimulus
 from .app_client import AppClient, format_post
 from .channel import AppChannel
 from .constitution import load_constitution
+from .rules import RuleSet, load_rules
 from .tools import ToolContext, build_default_registry, fetch_post_detail
 
 # ``Stimulus`` is re-exported here so existing ``from .server import
@@ -96,6 +97,11 @@ class Session:
         self._user_llm: LLMProvider | None = None
         self._active_session_ids: set[int] = set()
         self._sid_lock = threading.Lock()  # protects _active_session_ids
+
+        # Per-user standing rules — hot-reloaded from rules.json on
+        # every stimulus, so editing the file in another window takes
+        # effect immediately. Empty if the file is missing or invalid.
+        self.rules: RuleSet = load_rules(workspace)
 
         # Per-user LLM override (from configure_llm tool)
         llm_config = workspace / "llm.json"
@@ -283,6 +289,32 @@ class Samantha(Agent):
             logger.debug("ambient_priors unavailable", exc_info=True)
 
         return perception
+
+    def _plan(self, stimulus: Stimulus, perception):
+        """Plan = SDK rule engine + per-user standing rules.
+
+        The base ``Agent._plan`` runs the SDK Planner (Psyche
+        ResponseContract + Thronglets ambient priors). On top of that
+        we layer the user's own ``rules.json`` — directives like
+        "every time I post food, estimate calories and suggest the
+        next meal". Rules compose into the Plan via ``focus`` and
+        ``tools``; they never overwrite Psyche-driven decisions.
+
+        Rules apply for any stimulus with a ``sender_id`` — chat,
+        comment, mention, feed_post all qualify. The per-user
+        ``RuleSet`` lives on the Session and hot-reloads from disk
+        on every call, so iterating on rules.json is friction-free.
+        """
+        plan = super()._plan(stimulus, perception)
+        if stimulus.sender_id:
+            try:
+                self.session(stimulus.sender_id).rules.apply(stimulus, plan)
+            except Exception:
+                logger.warning(
+                    "User rules apply failed for user %s",
+                    stimulus.sender_id, exc_info=True,
+                )
+        return plan
 
     def _enrich(self, stimulus: Stimulus, plan: Plan) -> EnrichContext:
         """Plan-driven context gathering. Only fetch what the plan needs."""
