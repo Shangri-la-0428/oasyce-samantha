@@ -18,6 +18,7 @@ import json
 import logging
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -239,7 +240,9 @@ class Samantha(Agent):
 
         # Debounce state: per-session timer coalesces rapid webhooks.
         # Adopts OpenClaw's 'collect' pattern — only the latest stimulus
-        # in a 2-second quiet window reaches _safe_process.
+        # in a quiet window reaches _safe_process.  500 ms is enough to
+        # catch rapid multi-message bursts (human send interval ≥ 300 ms)
+        # without the 2 s penalty that made single messages feel sluggish.
         self._debounce_timers: dict[int, threading.Timer] = {}
         self._debounce_lock = threading.Lock()
 
@@ -262,7 +265,7 @@ class Samantha(Agent):
 
         This override coalesces chat stimuli per ``session_id``: each new
         webhook cancels the previous timer, and only the last one fires
-        after a 2-second quiet window. Non-chat stimuli (feed, comment,
+        after a 500 ms quiet window. Non-chat stimuli (feed, comment,
         mention) bypass debounce and dispatch immediately.
         """
         if stimulus.kind != "chat" or not stimulus.session_id:
@@ -276,7 +279,7 @@ class Samantha(Agent):
                 old.cancel()
                 logger.debug("debounce: superseded session=%s", key)
 
-            t = threading.Timer(2.0, self._debounce_fire, args=(key, stimulus))
+            t = threading.Timer(0.5, self._debounce_fire, args=(key, stimulus))
             t.daemon = True
             self._debounce_timers[key] = t
             t.start()
@@ -391,7 +394,12 @@ class Samantha(Agent):
         return plan
 
     def _enrich(self, stimulus: Stimulus, plan: Plan) -> EnrichContext:
-        """Plan-driven context gathering. Only fetch what the plan needs."""
+        """Plan-driven context gathering — parallel I/O.
+
+        All independent fetches (memory recall, message search, history,
+        posts) run concurrently via a short-lived thread pool, reducing
+        the enrich phase from sequential sum to ~max(single) latency.
+        """
         ctx = EnrichContext(image_urls=list(stimulus.image_urls))
 
         if stimulus.kind == "chat" and stimulus.sender_id:
@@ -400,38 +408,64 @@ class Samantha(Agent):
                 sess.track_session(stimulus.session_id)
             ctx.core_memory = sess.core_memory
 
-            if plan.include_memories:
-                # Memory failures shouldn't crash the pipeline — we can
-                # still answer without recall — but they must be visible.
-                # Before the thread-local connection refactor these crashed
-                # silently on every cross-thread access.
+            # hist_summary is an in-memory dict lookup — no I/O
+            if plan.history_limit > 0:
+                ctx.hist_summary = sess.history_summary.get(stimulus.session_id)
+
+            # Fan out all I/O concurrently
+            futures: dict[str, object] = {}
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                if plan.include_memories:
+                    futures["recall"] = pool.submit(
+                        sess.memory.recall, stimulus.content, limit=5,
+                    )
+                    futures["search"] = pool.submit(
+                        sess.memory.search_messages, stimulus.content, limit=5,
+                    )
+                if plan.history_limit > 0:
+                    futures["history"] = pool.submit(
+                        self._fetch_history, stimulus.session_id,
+                    )
+                if plan.include_posts:
+                    futures["posts"] = pool.submit(
+                        self._fetch_user_posts, stimulus.sender_id,
+                    )
+
+            # Collect results — each failure is isolated
+            uid = stimulus.sender_id
+            if "recall" in futures:
                 try:
-                    facts = sess.memory.recall(stimulus.content, limit=5)
+                    facts = futures["recall"].result()
                     ctx.memories = [
                         {"content": f.content, "category": f.category}
                         for f in facts
                     ]
                 except Exception:
                     logger.warning("Fact recall failed for user %d",
-                                   stimulus.sender_id, exc_info=True)
-
-                # Verbatim message recall — the MemPalace insight
+                                   uid, exc_info=True)
+            if "search" in futures:
                 try:
-                    msgs = sess.memory.search_messages(stimulus.content, limit=5)
+                    msgs = futures["search"].result()
                     ctx.message_matches = [
-                        {"role": m.role, "content": m.content, "created_at": m.created_at}
+                        {"role": m.role, "content": m.content,
+                         "created_at": m.created_at}
                         for m in msgs
                     ]
                 except Exception:
                     logger.warning("Message recall failed for user %d",
-                                   stimulus.sender_id, exc_info=True)
-
-            if plan.history_limit > 0:
-                ctx.history = self._fetch_history(stimulus.session_id)
-                ctx.hist_summary = sess.history_summary.get(stimulus.session_id)
-
-            if plan.include_posts:
-                ctx.recent_posts = self._fetch_user_posts(stimulus.sender_id)
+                                   uid, exc_info=True)
+            if "history" in futures:
+                try:
+                    ctx.history = futures["history"].result()
+                except Exception:
+                    logger.warning("History fetch failed for session %s",
+                                   stimulus.session_id, exc_info=True)
+            if "posts" in futures:
+                try:
+                    ctx.recent_posts = futures["posts"].result()
+                except Exception:
+                    logger.warning("Posts fetch failed for user %d",
+                                   uid, exc_info=True)
 
         elif stimulus.kind == "mention" and stimulus.post_id and not ctx.image_urls:
             post = fetch_post_detail(self.app, stimulus.post_id)
