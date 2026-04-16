@@ -237,11 +237,85 @@ class Samantha(Agent):
         # point at the same object.
         self.sigil = self.identity
 
+        # Debounce state: per-session timer coalesces rapid webhooks.
+        # Adopts OpenClaw's 'collect' pattern — only the latest stimulus
+        # in a 2-second quiet window reaches _safe_process.
+        self._debounce_timers: dict[int, threading.Timer] = {}
+        self._debounce_lock = threading.Lock()
+
     def session(self, user_id: int) -> Session:
         with self._sessions_lock:
             if user_id not in self._sessions:
                 self._sessions[user_id] = Session.load(user_id, self._registry)
             return self._sessions[user_id]
+
+    # ── Debounce (collect pattern) ─────────────────────────────
+
+    def submit(self, stimulus: Stimulus) -> None:
+        """Debounced dispatch for chat; immediate for other kinds.
+
+        The Go backend dispatches a webhook for every new human message,
+        each carrying the full pending backlog. Rapid messages produce
+        overlapping webhooks that the base ``Agent.submit`` would fan out
+        to separate workers — wasting LLM calls and risking duplicate
+        replies.
+
+        This override coalesces chat stimuli per ``session_id``: each new
+        webhook cancels the previous timer, and only the last one fires
+        after a 2-second quiet window. Non-chat stimuli (feed, comment,
+        mention) bypass debounce and dispatch immediately.
+        """
+        if stimulus.kind != "chat" or not stimulus.session_id:
+            self._executor.submit(self._safe_process, stimulus)
+            return
+
+        key = stimulus.session_id
+        with self._debounce_lock:
+            old = self._debounce_timers.pop(key, None)
+            if old is not None:
+                old.cancel()
+                logger.debug("debounce: superseded session=%s", key)
+
+            t = threading.Timer(2.0, self._debounce_fire, args=(key, stimulus))
+            t.daemon = True
+            self._debounce_timers[key] = t
+            t.start()
+
+    def _debounce_fire(self, key: int, stimulus: Stimulus) -> None:
+        """Timer callback: dispatch the surviving stimulus."""
+        with self._debounce_lock:
+            self._debounce_timers.pop(key, None)
+        self._executor.submit(self._safe_process, stimulus)
+
+    # ── Pipeline overrides ─────────────────────────────────────
+
+    def _safe_process(self, stimulus: Stimulus) -> None:
+        """Intercept slash commands before the LLM pipeline.
+
+        Commands (``/key``, ``/help``) are handled directly — no LLM
+        call, no API key required. This solves the bootstrap problem:
+        users can configure their key before Joi can understand natural
+        language.
+
+        Uses ``last_message`` from metadata because the Go backend may
+        batch multiple pending messages into one webhook — we check the
+        latest message, not the joined content.
+        """
+        if stimulus.kind == "chat":
+            last_msg = stimulus.metadata.get("last_message", stimulus.content).strip()
+            if last_msg.startswith("/"):
+                try:
+                    from .commands import handle_command
+                    response = handle_command(last_msg, self, stimulus.sender_id)
+                    if response is not None:
+                        logger.info("Command handled: %s -> %d chars",
+                                    last_msg.split()[0], len(response))
+                        self.channel.deliver(stimulus, response)
+                        return
+                except Exception:
+                    logger.error("Command handler failed for: %s",
+                                 last_msg[:50], exc_info=True)
+        super()._safe_process(stimulus)
 
     def _log_turn(self, stimulus: Stimulus, response: str) -> None:
         """Log verbatim turn to session memory (chat only)."""
@@ -603,7 +677,11 @@ class Samantha(Agent):
             return []
 
     def close(self) -> None:
-        """Shut down executor (via base) and release per-user sessions."""
+        """Cancel debounce timers, shut down executor, release sessions."""
+        with self._debounce_lock:
+            for timer in self._debounce_timers.values():
+                timer.cancel()
+            self._debounce_timers.clear()
         super().close()
         for sess in self._sessions.values():
             sess.close()

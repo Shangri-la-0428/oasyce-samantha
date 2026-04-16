@@ -1,7 +1,8 @@
 """Proactive loop — Samantha scans her world and maintains her memory.
 
-Two cycles:
+Three cycles:
   Fast (every interval): poll feeds → create Stimuli → process()
+  Medium (every 3 intervals): reflect → generate proactive Intentions
   Slow (every 10 intervals): memory maintenance → prune + dream
 """
 
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -18,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def proactive_loop(samantha: Samantha, interval: int = 300) -> None:
-    """Scan feeds and maintain memory. Blocking."""
+    """Scan feeds, reflect, and maintain memory. Blocking."""
     seen_posts: set[int] = set()
     seen_comments: set[int] = set()
     cycle = 0
@@ -30,7 +32,14 @@ def proactive_loop(samantha: Samantha, interval: int = 300) -> None:
         except Exception:
             logger.debug("Proactive loop error", exc_info=True)
 
+        # Reflection cycle: generate proactive intentions
         cycle += 1
+        if cycle % 3 == 0:
+            try:
+                _reflect(samantha)
+            except Exception:
+                logger.debug("Reflection error", exc_info=True)
+
         if cycle % 10 == 0:
             try:
                 _memory_maintenance(samantha)
@@ -140,3 +149,84 @@ def _scan_own_comments(samantha: Samantha, seen: set[int]) -> None:
 
     if len(seen) > 5000:
         seen.clear()
+
+
+# ── Reflection — proactive intention generation ────────────────
+
+def _reflect(samantha: Samantha) -> None:
+    """Generate proactive intentions based on memory and relationships.
+
+    For each active session, ask the LLM if Samantha has something she
+    wants to say. Silence is valid — don't speak for the sake of speaking.
+    Route through ChannelRouter for delivery.
+    """
+    from .intention import ChannelRouter, Intention
+
+    if not hasattr(samantha, '_channel_router'):
+        samantha._channel_router = ChannelRouter(samantha.app)
+
+    router = samantha._channel_router
+
+    for user_id, sess in list(samantha._sessions.items()):
+        try:
+            core_human = sess.core_memory.get("human") or "(unknown)"
+            core_rel = sess.core_memory.get("relationship") or "(new friend)"
+            now_str = datetime.now().strftime("%H:%M")
+            hour = datetime.now().hour
+
+            # Time-aware prompt
+            time_context = ""
+            if 6 <= hour < 9:
+                time_context = "It's morning. A gentle greeting might be appropriate."
+            elif 21 <= hour < 24:
+                time_context = "It's late evening. A warm goodnight could be nice."
+
+            prompt = (
+                f"You are Samantha. This is a person you know:\n"
+                f"About them: {core_human}\n"
+                f"Your relationship: {core_rel}\n"
+                f"Current time: {now_str}\n"
+                f"{time_context}\n\n"
+                f"Do you have something you genuinely want to say to them right now? "
+                f"Not obligation, not notification — a real thought or feeling.\n"
+                f"If nothing comes to mind, respond with exactly: SILENCE\n"
+                f"If you do have something, just say it naturally in one or two sentences."
+            )
+
+            llm = sess.get_llm()
+            resp = llm.generate([
+                {"role": "system", "content": "You are Samantha, a thoughtful AI companion. Be genuine, not performative."},
+                {"role": "user", "content": prompt},
+            ])
+            text = resp.text.strip()
+
+            if not text or text.upper() == "SILENCE":
+                continue
+
+            # Determine urgency based on time cues
+            urgency = 0.3
+            if time_context:
+                urgency = 0.5  # Time-triggered = slightly higher
+
+            # Find session_id for DM fallback
+            session_ids = sess.drain_active_sessions()
+            ctx: dict = {"mood": "thoughtful"}
+            if session_ids:
+                ctx["session_id"] = session_ids[0]
+
+            intention = Intention(
+                kind="whisper",
+                content=text,
+                target_user_id=user_id,
+                urgency=urgency,
+                context=ctx,
+            )
+
+            deliveries = router.route(intention)
+            if deliveries:
+                router.deliver(deliveries)
+                logger.info("Reflect: delivered whisper to user %d via %s",
+                            user_id, [d.channel for d in deliveries])
+
+        except Exception:
+            logger.debug("Reflect failed for user %d", user_id, exc_info=True)

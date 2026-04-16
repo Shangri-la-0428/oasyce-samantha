@@ -39,13 +39,30 @@ def make_handler(samantha: "Samantha") -> type[BaseHTTPRequestHandler]:
                 sender_id = body.get("sender_id", 0)
                 content = body.get("content", "")
 
+                last_message = ""
+                if not content:
+                    # Check if payload has messages array (versioned coordinator format)
+                    messages = body.get("messages", [])
+                    if messages:
+                        content = " ".join(m.get("content", "") for m in messages).strip()
+                        last_message = messages[-1].get("content", "").strip()
+
                 if not content:
                     self._respond(200, {"ok": True})
                     return
 
                 samantha.submit(Stimulus(
                     kind="chat", content=content,
-                    sender_id=sender_id, session_id=session_id,
+                    sender_id=sender_id or body.get("human_user_id", 0),
+                    session_id=session_id,
+                    metadata={
+                        "reply_version": body.get("reply_version"),
+                        "reply_to_seq": body.get("to_user_seq"),
+                        "from_user_seq": body.get("from_user_seq"),
+                        "dispatch_key": body.get("dispatch_key"),
+                        "trace_id": body.get("trace_id"),
+                        "last_message": last_message or content,
+                    },
                 ))
                 self._respond(200, {"ok": True})
 

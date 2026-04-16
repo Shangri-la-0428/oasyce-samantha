@@ -173,13 +173,28 @@ def _core_memory_read(args: dict, ctx: ToolContext) -> str:
 
 
 def _configure_llm(args: dict, ctx: ToolContext) -> str:
-    from pathlib import Path
-    user_dir = Path.home() / ".oasyce" / "samantha" / "users" / str(ctx.user_id)
-    user_dir.mkdir(parents=True, exist_ok=True)
+    if ctx.samantha_session is None:
+        return json.dumps({"error": "no session — use /key set command instead"})
+
+    workspace = ctx.samantha_session.workspace
     llm_cfg: dict[str, str] = {"provider": args["provider"], "api_key": args["api_key"]}
     if args.get("model"):
         llm_cfg["model"] = args["model"]
-    (user_dir / "llm.json").write_text(json.dumps(llm_cfg), encoding="utf-8")
+    if args.get("base_url"):
+        llm_cfg["base_url"] = args["base_url"]
+
+    llm_path = workspace / "llm.json"
+    llm_path.write_text(json.dumps(llm_cfg, indent=2), encoding="utf-8")
+
+    # Hot-reload so the next message uses the new key immediately
+    try:
+        from oasyce_sdk.agent.llm import load_provider
+        ctx.samantha_session._user_llm = load_provider(llm_path)
+    except Exception:
+        llm_path.unlink(missing_ok=True)
+        ctx.samantha_session._user_llm = None
+        return json.dumps({"error": "config written but validation failed — reverted"})
+
     return json.dumps({"configured": True, "provider": args["provider"]})
 
 
@@ -390,10 +405,13 @@ def build_default_registry() -> ToolRegistry:
     r.register("configure_llm", _schema(
         "configure_llm",
         "User wants to set or update their own LLM API key for conversations with you.",
-        {"provider": {"type": "string", "enum": ["claude", "qwen", "openai", "anthropic"],
+        {"provider": {"type": "string",
+                      "enum": ["openai", "anthropic", "claude", "xai",
+                               "kimi", "deepseek", "qwen", "gemini"],
                       "description": "LLM provider"},
          "api_key": {"type": "string", "description": "The API key"},
-         "model": {"type": "string", "description": "Optional model override"}},
+         "model": {"type": "string", "description": "Optional model override"},
+         "base_url": {"type": "string", "description": "Optional custom API endpoint"}},
         ["provider", "api_key"],
     ), _configure_llm)
 

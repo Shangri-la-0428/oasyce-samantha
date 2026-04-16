@@ -57,12 +57,14 @@ class _FakeAppClient:
 
     def __init__(self, *, fail: bool = False) -> None:
         self.calls: list[tuple[int, str]] = []
+        self.call_kwargs: list[dict] = []
         self.fail = fail
 
-    def send_message(self, session_id: int, content: str) -> dict:
+    def send_message(self, session_id: int, content: str, **kwargs) -> dict:
         if self.fail:
             raise RuntimeError("simulated network failure")
         self.calls.append((session_id, content))
+        self.call_kwargs.append(kwargs)
         return {"ok": True}
 
 
@@ -93,6 +95,41 @@ class TestAppChannel:
             "hello there",
         )
         assert app.calls == [(42, "hello there")]
+
+    def test_version_fields_passed_through(self):
+        """When the Go coordinator sends reply_version + reply_to_seq in the
+        stimulus metadata, AppChannel must forward them to AppClient so the
+        backend can validate the agent reply version guard.
+        """
+        from oasyce_samantha.channel import AppChannel
+
+        app = _FakeAppClient()
+        channel = AppChannel(app)
+        channel.deliver(
+            Stimulus(
+                kind="chat", content="hi", session_id=42, sender_id=7,
+                metadata={"reply_version": 3, "reply_to_seq": 5},
+            ),
+            "hello there",
+        )
+        assert app.calls == [(42, "hello there")]
+        assert app.call_kwargs[0]["agent_reply_version"] == 3
+        assert app.call_kwargs[0]["agent_reply_to_seq"] == 5
+
+    def test_missing_version_sends_none(self):
+        """When metadata has no version fields (e.g., proactive whisper via
+        ChannelRouter → DM), AppChannel must still deliver without version."""
+        from oasyce_samantha.channel import AppChannel
+
+        app = _FakeAppClient()
+        channel = AppChannel(app)
+        channel.deliver(
+            Stimulus(kind="chat", content="hi", session_id=42),
+            "proactive hello",
+        )
+        assert app.calls == [(42, "proactive hello")]
+        assert app.call_kwargs[0]["agent_reply_version"] is None
+        assert app.call_kwargs[0]["agent_reply_to_seq"] is None
 
     def test_non_chat_kinds_are_not_delivered(self):
         """Comments, mentions, and feed posts express their reply through

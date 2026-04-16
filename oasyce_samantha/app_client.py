@@ -39,10 +39,17 @@ class AppClient:
 
     # ── Convenience methods for common endpoints ──────────────
 
-    def send_message(self, session_id: int, content: str) -> dict:
-        return self.post("/chat/message/send", json={
+    def send_message(self, session_id: int, content: str,
+                     agent_reply_version: int | None = None,
+                     agent_reply_to_seq: int | None = None) -> dict:
+        payload: dict = {
             "sessionID": str(session_id), "contentType": 1, "content": content,
-        })
+        }
+        if agent_reply_version is not None:
+            payload["agentReplyVersion"] = str(agent_reply_version)
+        if agent_reply_to_seq is not None:
+            payload["agentReplyToSeq"] = str(agent_reply_to_seq)
+        return self.post("/chat/message/send", json=payload)
 
     def fetch_history(self, session_id: int, limit: int = 20) -> list[dict]:
         data = self.get("/chat/message/list",
@@ -85,6 +92,28 @@ class AppClient:
 
     def like_post(self, post_id: int) -> dict:
         return self.post(f"/post/{post_id}/like")
+
+    # ── Agent / Widget endpoints ────────────────────────────────
+
+    def push_widget_state(self, user_id: int, text: str,
+                          mood: str = "calm", tap_action: str = "chat") -> dict:
+        return self.post("/agent/widget", json={
+            "user_id": user_id,
+            "text": text,
+            "mood": mood,
+            "tap_action": tap_action,
+        })
+
+    def get_agent_preference(self, target_user_id: int) -> dict:
+        data = self.get("/agent/preference/cached",
+                        params={"target_user_id": target_user_id})
+        return data.get("data", {}) or {}
+
+    def create_post(self, content: str) -> dict:
+        return self.post("/post/create-with-existing-media", json={
+            "content": content,
+            "media": [],
+        })
 
 
 # ── Media extraction (single source of truth) ─────────────────

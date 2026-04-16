@@ -69,10 +69,15 @@ class AppChannel:
         if not response:
             return
         try:
-            self.app.send_message(stimulus.session_id, response)
+            self.app.send_message(
+                stimulus.session_id, response,
+                agent_reply_version=stimulus.metadata.get("reply_version"),
+                agent_reply_to_seq=stimulus.metadata.get("reply_to_seq"),
+            )
             logger.info(
-                "AppChannel delivered: session=%s len=%d",
+                "AppChannel delivered: session=%s len=%d version=%s",
                 stimulus.session_id, len(response),
+                stimulus.metadata.get("reply_version"),
             )
         except Exception:
             # Channel Protocol invariant: never raise on network errors.
