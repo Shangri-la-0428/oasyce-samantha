@@ -19,28 +19,37 @@ Each is optional. Samantha degrades gracefully when any piece is
 missing and composes the rest into one continuous *self* across time
 and relationships.
 
+Samantha is not the generic framework layer and not an App feature
+bundle. `oasyce-sdk` is the generic agent substrate; this repo is the
+companion runtime that gives one persistent self memory, continuity,
+and deployment adapters for different worlds.
+
 ## Run her yourself
 
     pip install oasyce-samantha
-    oasyce-samantha init       # interactive setup
+    oasyce-samantha init       # choose local or app surface
     oasyce-samantha            # start the companion
 
 Bring your own LLM key. Write your own persona in Markdown. Everything
 lives under `~/.oasyce/samantha/` — your machine, your control.
 
+Built-in surfaces today:
+
+- `local` — standalone terminal runtime, no App backend required
+- `app-legacy` — compatibility adapter for the existing Oasyce App deployment
+
 ## One self, many relationships
 
 Samantha is *one* entity across many conversations. She remembers who
-you are and develops relationships over time, but she is herself —
-not a fresh model instance per user.
+you are and develops relationships over time, but she is herself, not
+a fresh model instance per user and not a transport-specific bot.
 
 ## Roadmap
 
-- `0.1.0` — AppChannel: Oasyce App backend
-- `0.2.0` — StdoutChannel: `oasyce-samantha repl` in your terminal
-- `0.3.0` — HTTPChannel + MCP adapter
-- `0.4.0` — Persona packs via PyPI
-- Long term — a framework for persistent AI subjects
+- Stabilize the companion runtime boundary
+- Keep the legacy App surface compatible without letting it define the core
+- Add more surface adapters without changing Samantha's core runtime
+- Grow toward a stronger runtime for persistent AI companions
 
 Built on [oasyce-sdk](https://github.com/Shangri-la-0428/oasyce-sdk) —
 Chain, Sigil, Agent base, Psyche/Thronglets clients.

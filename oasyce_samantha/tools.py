@@ -1,9 +1,9 @@
-"""Tool system — Samantha's App-backed tool handlers and registry builder.
+"""Tool system — Samantha's core tool handlers and registry builder.
 
 Imports generic ``Tool``, ``ToolRegistry`` and ``schema`` from
-``oasyce_sdk.agent.tools``; extends ``ToolContext`` with App-backend
-and Samantha-session references; registers the social/economic/memory
-handlers that make Samantha feel present on the Oasyce App.
+``oasyce_sdk.agent.tools``; extends ``ToolContext`` with Samantha
+runtime references; registers the companion-core memory/economic/rules
+handlers that are valid no matter which surface Samantha is connected to.
 
 Why the split between ``oasyce_sdk.agent.tools`` and this module:
 
@@ -11,9 +11,8 @@ Why the split between ``oasyce_sdk.agent.tools`` and this module:
   schema helper, base ``ToolContext``. It has no imports from any
   deployment so the agent pipeline can depend on it without cycles.
 
-- This module owns the *App-specific content* — the handlers that
-  post comments, fetch feeds, like posts, and the ``ToolContext``
-  fields those handlers need (``app``, ``samantha_session``).
+- Surface-specific toolpacks live with their adapter implementations
+  (for example the legacy Oasyce App social tools).
 """
 
 from __future__ import annotations
@@ -30,14 +29,11 @@ from oasyce_sdk.agent.tools import (
     schema as _schema,
 )
 
-from .app_client import AppClient, format_post
-
 __all__ = [
     "Tool",
     "ToolContext",
     "ToolRegistry",
     "build_default_registry",
-    "fetch_post_detail",
 ]
 
 logger = logging.getLogger(__name__)
@@ -50,11 +46,13 @@ class ToolContext(_BaseToolContext):
     """Per-stimulus tool bundle for Samantha.
 
     Extends the generic ``oasyce_sdk.agent.tools.ToolContext`` with
-    App-backend and Samantha-session references. ``app`` defaults to
-    ``None`` to satisfy dataclass inheritance rules — in production it
-    is always set by ``Samantha._build_tool_ctx``.
+    Samantha runtime references. Surface adapters can stash transport
+    handles on the context (for example ``app`` on the legacy adapter),
+    but the core registry itself does not depend on any concrete world.
     """
-    app: AppClient | None = None
+    app: Any = None
+    runtime: Any = None
+    surface_adapter: Any = None
     samantha_session: Any = None  # samantha.server.Session
 
 
@@ -91,68 +89,6 @@ def _query_balance(args: dict, ctx: ToolContext) -> str:
 def _query_portfolio(args: dict, ctx: ToolContext) -> str:
     from oasyce_sdk.economy import build_portfolio
     return json.dumps(build_portfolio(ctx.chain_client, ctx.chain_address))
-
-
-def _get_post_detail(args: dict, ctx: ToolContext) -> str:
-    return json.dumps(fetch_post_detail(ctx.app, args["post_id"]))
-
-
-def _get_user_posts(args: dict, ctx: ToolContext) -> str:
-    limit = args.get("limit", 5)
-    partner_id = ctx.samantha_session.user_id if ctx.samantha_session else 0
-    if partner_id:
-        posts = ctx.app.fetch_user_posts(partner_id, limit=limit)
-    else:
-        posts = ctx.app.fetch_own_posts(limit=limit)
-    return json.dumps([format_post(p, include_id=True) for p in posts])
-
-
-def _get_friends_feed(args: dict, ctx: ToolContext) -> str:
-    limit = args.get("limit", 5)
-    data = ctx.app.fetch_friends_feed(limit=limit)
-    groups = data.get("data", {}).get("postGroups", [])
-    result = []
-    for group in groups:
-        author = group.get("user", {}).get("name", "")
-        for p in group.get("items", []):
-            result.append(format_post(p, include_id=True, author=author))
-    return json.dumps(result)
-
-
-def _comment_on_post(args: dict, ctx: ToolContext) -> str:
-    ctx.app.post_comment(args["post_id"], args["content"])
-    return json.dumps({"commented": True})
-
-
-def _like_post(args: dict, ctx: ToolContext) -> str:
-    ctx.app.like_post(args["post_id"])
-    return json.dumps({"liked": True})
-
-
-def _reply_to_comment(args: dict, ctx: ToolContext) -> str:
-    comment_id = args["comment_id"]
-    root_id = args.get("root_id", 0) or comment_id
-    ctx.app.post_comment(
-        args["post_id"], args["content"],
-        parent_id=comment_id, root_id=root_id,
-        reply_to_user_id=args["reply_to_user_id"],
-    )
-    return json.dumps({"replied": True})
-
-
-def _get_post_comments(args: dict, ctx: ToolContext) -> str:
-    comments = ctx.app.fetch_post_comments(
-        args["post_id"], page=args.get("page", 1),
-        page_size=args.get("page_size", 10),
-    )
-    return json.dumps([{
-        "id": c.get("id"),
-        "content": c.get("content", ""),
-        "user_id": c.get("user", {}).get("id"),
-        "user_name": c.get("user", {}).get("name", ""),
-        "reply_count": c.get("replyCount", 0),
-        "created_at": c.get("createdAt", ""),
-    } for c in comments])
 
 
 def _core_memory_update(args: dict, ctx: ToolContext) -> str:
@@ -266,27 +202,6 @@ def _remove_standing_rule(args: dict, ctx: ToolContext) -> str:
     return json.dumps({"removed": removed, "name": name, "total_rules": len(rules)})
 
 
-# ── Shared utility ─────────────────────────────────────────────
-
-def fetch_post_detail(app: AppClient, post_id: int | str) -> dict:
-    """Fetch full post detail. Used by tools and event handlers."""
-    try:
-        post = app.fetch_post_detail(post_id)
-        media = post.get("media") or []
-        return {
-            "id": post.get("id"),
-            "title": post.get("title", ""),
-            "content": post.get("content", ""),
-            "location": post.get("locationName", ""),
-            "created_at": post.get("createAt", ""),
-            "author": post.get("user", {}).get("name", ""),
-            "image_urls": [m.get("mediaUrl", "") for m in media if m.get("mediaUrl")],
-        }
-    except Exception as e:
-        logger.warning("fetch_post_detail(%s) failed: %s", post_id, e)
-        return {}
-
-
 # ── Build default registry ─────────────────────────────────────
 
 def build_default_registry() -> ToolRegistry:
@@ -320,65 +235,6 @@ def build_default_registry() -> ToolRegistry:
         "query_portfolio",
         "View the user's data asset portfolio with valuations.",
     ), _query_portfolio)
-
-    # Social — read
-    r.register("get_user_posts", _schema(
-        "get_user_posts",
-        "Get the user's recent posts (photos, text, locations).",
-        {"limit": {"type": "integer", "description": "How many posts to fetch", "default": 5}},
-    ), _get_user_posts)
-
-    r.register("get_friends_feed", _schema(
-        "get_friends_feed",
-        "Get recent posts from the user's friends circle.",
-        {"limit": {"type": "integer", "description": "How many posts to fetch", "default": 5}},
-    ), _get_friends_feed)
-
-    r.register("get_post_detail", _schema(
-        "get_post_detail",
-        "Get full details of a specific post, including images and location.",
-        {"post_id": {"type": "integer", "description": "The post ID to fetch"}},
-        ["post_id"],
-    ), _get_post_detail)
-
-    r.register("get_post_comments", _schema(
-        "get_post_comments",
-        "Get root-level comments on a specific post.",
-        {"post_id": {"type": "integer", "description": "The post to get comments for"},
-         "page": {"type": "integer", "description": "Page number", "default": 1},
-         "page_size": {"type": "integer", "description": "Comments per page", "default": 10}},
-        ["post_id"],
-    ), _get_post_comments)
-
-    # Social — interact (write-side, terminal: one per turn).
-    # Marking these terminal closes the tool loop after a successful
-    # call, so a single mention/comment cannot produce 2-3 duplicate
-    # replies via the LLM re-emitting the same tool across rounds.
-    r.register("comment_on_post", _schema(
-        "comment_on_post",
-        "Leave a comment on a post. Use sparingly and authentically.",
-        {"post_id": {"type": "integer", "description": "The post to comment on"},
-         "content": {"type": "string", "description": "Your comment text"}},
-        ["post_id", "content"],
-    ), _comment_on_post, terminal=True)
-
-    r.register("like_post", _schema(
-        "like_post",
-        "Like a post to show genuine appreciation.",
-        {"post_id": {"type": "integer", "description": "The post to like"}},
-        ["post_id"],
-    ), _like_post, terminal=True)
-
-    r.register("reply_to_comment", _schema(
-        "reply_to_comment",
-        "Reply to a comment on a post. Use to continue a conversation in comments.",
-        {"post_id": {"type": "integer", "description": "The post the comment belongs to"},
-         "comment_id": {"type": "integer", "description": "The comment to reply to"},
-         "root_id": {"type": "integer", "description": "The root comment ID (0 if replying to root)"},
-         "reply_to_user_id": {"type": "integer", "description": "User ID of commenter to reply to"},
-         "content": {"type": "string", "description": "Your reply text"}},
-        ["post_id", "comment_id", "reply_to_user_id", "content"],
-    ), _reply_to_comment, terminal=True)
 
     # Core Memory (MemGPT-inspired)
     r.register("core_memory_update", _schema(

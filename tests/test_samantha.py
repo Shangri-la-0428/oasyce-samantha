@@ -40,9 +40,15 @@ class TestConstitution:
 
 class TestTools:
     @staticmethod
-    def _registry():
+    def _registry(*, include_app: bool = False):
         from oasyce_samantha.tools import build_default_registry
-        return build_default_registry()
+
+        registry = build_default_registry()
+        if include_app:
+            from oasyce_samantha.adapters.legacy_app_tools import register_legacy_app_tools
+
+            register_legacy_app_tools(registry)
+        return registry
 
     @staticmethod
     def _ctx(mem):
@@ -92,7 +98,7 @@ class TestTools:
         the multi-reply bug — ``base.py::_generate`` reads ``is_terminal``
         to decide whether to keep looping.
         """
-        registry = self._registry()
+        registry = self._registry(include_app=True)
         assert registry.is_terminal("comment_on_post") is True
         assert registry.is_terminal("reply_to_comment") is True
         assert registry.is_terminal("like_post") is True
@@ -101,6 +107,13 @@ class TestTools:
         assert registry.is_terminal("recall_memory") is False
         assert registry.is_terminal("save_memory") is False
         assert registry.is_terminal("get_post_detail") is False
+
+    def test_default_registry_is_surface_agnostic(self):
+        registry = self._registry()
+        names = {tool["name"] for tool in registry.definitions}
+        assert "save_memory" in names
+        assert "get_post_detail" not in names
+        assert "reply_to_comment" not in names
 
 
 # ── Session isolation ─────────────────────────────────────────────
@@ -699,9 +712,15 @@ class TestStandingRuleTools:
 
 class TestLLMSchema:
     @staticmethod
-    def _defs():
+    def _defs(*, include_app: bool = False):
         from oasyce_samantha.tools import build_default_registry
-        return build_default_registry().definitions
+
+        registry = build_default_registry()
+        if include_app:
+            from oasyce_samantha.adapters.legacy_app_tools import register_legacy_app_tools
+
+            register_legacy_app_tools(registry)
+        return registry.definitions
 
     def test_tool_defs_are_valid(self):
         for tool in self._defs():
@@ -711,12 +730,12 @@ class TestLLMSchema:
             assert tool["parameters"]["type"] == "object"
 
     def test_new_comment_tools_exist(self):
-        names = {t["name"] for t in self._defs()}
+        names = {t["name"] for t in self._defs(include_app=True)}
         assert "reply_to_comment" in names
         assert "get_post_comments" in names
 
     def test_reply_to_comment_requires_fields(self):
-        reply_tool = next(t for t in self._defs() if t["name"] == "reply_to_comment")
+        reply_tool = next(t for t in self._defs(include_app=True) if t["name"] == "reply_to_comment")
         required = reply_tool["parameters"]["required"]
         assert "post_id" in required
         assert "comment_id" in required
