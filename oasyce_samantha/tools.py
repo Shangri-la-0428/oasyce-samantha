@@ -189,6 +189,79 @@ def _list_standing_rules(args: dict, ctx: ToolContext) -> str:
     return json.dumps([r.to_dict() for r in rules.rules], ensure_ascii=False)
 
 
+def _make_commitment(args: dict, ctx: ToolContext) -> str:
+    from .commitments import Commitment
+    from datetime import datetime, timezone
+
+    if ctx.samantha_session is None:
+        return json.dumps({"error": "no session — commitments need a chat context"})
+
+    name = str(args.get("name") or "").strip()
+    instruction = str(args.get("instruction") or "").strip()
+    topics = args.get("topics") or []
+    if isinstance(topics, str):
+        topics = [topics]
+    topics = [str(t).strip() for t in topics if str(t).strip()]
+
+    if not name or not instruction or not topics:
+        return json.dumps({"error": "name, topics, and instruction are required"})
+
+    from .annotator import TOPIC_KEYWORDS
+    known = set(TOPIC_KEYWORDS.keys())
+    unknown = [t for t in topics if t not in known]
+    if unknown:
+        logger.info("Commitment %s uses unknown topics: %s", name, unknown)
+
+    commitment = Commitment(
+        name=name,
+        topics=topics,
+        instruction=instruction,
+        tools=[str(t) for t in (args.get("tools") or [])],
+        kinds=[str(k) for k in (args.get("kinds") or [])],
+        cadence=str(args.get("cadence") or "every"),
+        active=True,
+        created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        fired_count=0,
+        last_fired_at="",
+    )
+    commitments = ctx.samantha_session.commitments
+    added = commitments.add(commitment)
+    commitments.save()
+    return json.dumps({
+        "saved": True,
+        "name": commitment.name,
+        "added": added,
+        "total_commitments": len(commitments),
+    })
+
+
+def _list_commitments(args: dict, ctx: ToolContext) -> str:
+    if ctx.samantha_session is None:
+        return json.dumps({"error": "no session"})
+    commitments = ctx.samantha_session.commitments
+    return json.dumps(
+        [c.to_dict() for c in commitments.commitments],
+        ensure_ascii=False,
+    )
+
+
+def _withdraw_commitment(args: dict, ctx: ToolContext) -> str:
+    if ctx.samantha_session is None:
+        return json.dumps({"error": "no session"})
+    name = str(args.get("name") or "").strip()
+    if not name:
+        return json.dumps({"error": "name required"})
+    commitments = ctx.samantha_session.commitments
+    withdrawn = commitments.remove(name)
+    if withdrawn:
+        commitments.save()
+    return json.dumps({
+        "withdrawn": withdrawn,
+        "name": name,
+        "total_commitments": len(commitments),
+    })
+
+
 def _remove_standing_rule(args: dict, ctx: ToolContext) -> str:
     if ctx.samantha_session is None:
         return json.dumps({"error": "no session"})
@@ -304,5 +377,43 @@ def build_default_registry() -> ToolRegistry:
         {"name": {"type": "string", "description": "The rule name to remove"}},
         ["name"],
     ), _remove_standing_rule)
+
+    # Commitments — topic-triggered relational agreements.
+    # Higher-level than rules: triggered by semantic topics (annotator L0),
+    # not text substrings. Born from conversation, managed with relational language.
+    r.register("make_commitment", _schema(
+        "make_commitment",
+        ("Make a commitment to this person — something you promise to do whenever "
+         "a certain topic comes up in their messages or posts. Example: 'whenever "
+         "food comes up, estimate calories and suggest the next meal'. Use this "
+         "when the user expresses a recurring wish that maps to a topic."),
+        {"name": {"type": "string",
+                  "description": "Short identifier, e.g. 'food-coach'"},
+         "topics": {"type": "array", "items": {"type": "string"},
+                    "description": ("Semantic topics that activate this commitment. "
+                                    "Available: travel, food, fitness, work, mood, "
+                                    "social, creative, learning, pets, nature")},
+         "instruction": {"type": "string",
+                         "description": "What you commit to do when the topic fires"},
+         "cadence": {"type": "string", "enum": ["every", "daily", "contextual"],
+                     "description": "How often: every match, once per day, or when contextually appropriate (default: every)"},
+         "tools": {"type": "array", "items": {"type": "string"},
+                   "description": "Optional extra tools to enable"},
+         "kinds": {"type": "array", "items": {"type": "string"},
+                   "description": "Optional stimulus kinds to restrict to"}},
+        ["name", "topics", "instruction"],
+    ), _make_commitment)
+
+    r.register("list_commitments", _schema(
+        "list_commitments",
+        "Review all commitments you've made to this person. Shows active and withdrawn commitments.",
+    ), _list_commitments)
+
+    r.register("withdraw_commitment", _schema(
+        "withdraw_commitment",
+        "Withdraw a commitment by name. The commitment is deactivated but preserved in the record.",
+        {"name": {"type": "string", "description": "The commitment name to withdraw"}},
+        ["name"],
+    ), _withdraw_commitment)
 
     return r

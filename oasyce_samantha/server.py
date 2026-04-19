@@ -50,6 +50,7 @@ from .annotator import BatchAnnotator, annotate_level0
 from .constitution import load_constitution
 from .world import CompanionWorld
 from .memory import CompanionMemory
+from .commitments import CommitmentSet, load_commitments
 from .rules import RuleSet, load_rules
 from .tools import ToolContext, build_default_registry
 
@@ -135,6 +136,7 @@ class Session:
         self._last_turn_time: float = 0.0
 
         self.rules: RuleSet = load_rules(workspace)
+        self.commitments: CommitmentSet = load_commitments(workspace)
 
         llm_config = workspace / "llm.json"
         if llm_config.exists():
@@ -427,11 +429,32 @@ class Samantha(Agent):
                 if ann is not None:
                     ann.target_id = obs_id
                     sess.observation_store.save_annotation(ann)
+                    stimulus.metadata["_annotation"] = ann
                 self._batch_annotator.enqueue(obs_id, obs)
             return obs_id
         except Exception:
             logger.debug("Store observation failed", exc_info=True)
             return None
+
+    def _quick_annotate(self, stimulus: Stimulus) -> Annotation | None:
+        """Zero-cost topic annotation for commitment matching.
+
+        For feed_post stimuli, reuses the L0 annotation already computed
+        in _store_observation (passed via metadata). For chat stimuli,
+        constructs a throwaway Observation and runs annotate_level0.
+        """
+        cached = stimulus.metadata.get("_annotation")
+        if cached is not None:
+            return cached
+        obs = Observation(
+            source_type=stimulus.kind,
+            source_id=0,
+            content=stimulus.content,
+        )
+        ann = annotate_level0(obs)
+        if ann is not None:
+            stimulus.metadata["_annotation"] = ann
+        return ann
 
     def _log_turn(self, stimulus: Stimulus, response: str) -> None:
         """Log verbatim turn to session memory (chat only)."""
@@ -659,6 +682,16 @@ class Samantha(Agent):
             except Exception:
                 logger.warning(
                     "User rules apply failed for user %s",
+                    stimulus.sender_id, exc_info=True,
+                )
+            try:
+                sess = self.session(stimulus.sender_id)
+                if len(sess.commitments) > 0:
+                    annotation = self._quick_annotate(stimulus)
+                    sess.commitments.apply(stimulus, annotation, plan)
+            except Exception:
+                logger.warning(
+                    "Commitments apply failed for user %s",
                     stimulus.sender_id, exc_info=True,
                 )
         return plan
