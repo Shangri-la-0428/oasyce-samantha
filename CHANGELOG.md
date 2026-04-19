@@ -1,5 +1,71 @@
 # Changelog
 
+## [0.3.0] - 2026-04-19
+
+Requires `oasyce-sdk>=0.14.0` for the `World` Protocol, `CognitiveMode`
+routing, and `Annotation` type.
+
+### Added
+
+- **v2 cognitive architecture** (Phases 1-10). One unified pipeline for
+  all four cognitive modes: REACTIVE, PROACTIVE, OBSERVING, REFLECTING.
+  Three concrete Streams (FeedStream, ReflectionStream, MaintenanceStream),
+  CompanionWorld for mode-aware delivery routing, and a cognitive loop
+  that polls all registered streams on their own schedules.
+
+- **Observation + Annotation system.** Feed posts are persisted as full
+  `Observation` objects with three-tier annotation: L0 zero-cost keyword
+  matching, L1 batch LLM (~$0.001/batch), L2 deep on-demand.
+
+- **CompanionMemory.** Unified 4-layer memory: episodic (facts +
+  messages), observations, knowledge triples, psyche snapshots. Essential
+  story generation in dream cycle. Four-path retrieval with closet boost.
+
+- **Self/Appraisal integration.** Psyche kernel state drives emotional
+  encoding of observations. High-intensity turns save psyche snapshots
+  for personality trajectory tracking.
+
+- **Collective knowledge.** Observation annotations shared to Thronglets
+  via `signal_post`. Cross-agent annotation retrieval via `ambient_priors`.
+  Hebbian boost for corroborated observations during dream cycle.
+
+- **Pre-compaction flush.** Session counters track turns and estimated
+  tokens. Threshold-triggered summarize + consolidate. Idle timeout
+  detection in MaintenanceStream.
+
+- **LLM streaming.** `process_stream(stimulus, on_token)` delivers text
+  chunks incrementally. World delivery skipped — caller routes chunks.
+
+- **Commitment system.** New module `oasyce_samantha.commitments` with
+  `Commitment` / `CommitmentSet` / `load_commitments`. Commitments are
+  semantic topic-triggered behavioral agreements — higher-level than
+  standing rules:
+
+  | | Rule | Commitment |
+  |-|------|-----------|
+  | Trigger | text substring | annotator L0 topic |
+  | Identity | configuration | relational agreement |
+  | State | stateless | active/paused, fired_count |
+  | Cadence | every match | every / daily / contextual |
+
+  Three new tools — `make_commitment`, `list_commitments`,
+  `withdraw_commitment` — let the LLM manage commitments from inside
+  conversation. `_quick_annotate` provides zero-cost topic detection
+  for chat stimuli. Commitments compose into `Plan.focus` and
+  `Plan.tools` alongside standing rules, never overwriting either.
+
+  Storage: `{workspace}/commitments.json` with hot reload (mtime check).
+
+### Changed
+
+- **Pipeline now mode-aware.** `run_pipeline` accepts optional `World`
+  and routes delivery through `World.act(mode, stimulus, response, plan)`
+  instead of the raw `deliver` callback.
+
+- **`_deliver` simplified.** Samantha's `_deliver` is now a passthrough
+  to `channel.deliver`. SILENCE filtering and proactive routing moved
+  to `CompanionWorld.act`.
+
 ## [0.2.0] - 2026-04-12
 
 Requires `oasyce-sdk>=0.13.0` for the `Tool.terminal` flag and the

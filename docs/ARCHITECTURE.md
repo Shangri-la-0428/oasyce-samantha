@@ -14,7 +14,7 @@ oasyce-sdk
 
 oasyce-samantha
   = companion runtime
-  = Session × Memory × Dream × Rules × Proactive × SurfaceAdapter
+  = Session × Memory × Dream × Rules × Commitments × Streams × World × SurfaceAdapter
 
 surface adapters
   = local terminal, legacy Oasyce App, future Discord / MCP / other worlds
@@ -39,9 +39,12 @@ Agent = Identity × Channel × Substrate × Tools × Constitution
 
 Samantha runtime adds:
   - Session per relationship
-  - Memory / core memory / history summaries
-  - Standing rules
-  - Dream / proactive loops
+  - CompanionMemory (episodic, observations, knowledge, psyche snapshots)
+  - Standing rules (substring trigger)
+  - Commitments (semantic topic trigger, cadence-gated)
+  - Streams (FeedStream, ReflectionStream, MaintenanceStream)
+  - CompanionWorld (mode-aware delivery: REACTIVE/PROACTIVE/OBSERVING/REFLECTING)
+  - Dream / cognitive loop
   - SurfaceAdapter loading
 ```
 
@@ -97,11 +100,15 @@ pretending a social feed exists.
 ├── constitution.md
 └── users/
     └── {user_id}/
-        ├── memory.db
+        ├── memory.db              # facts, messages, observations, annotations,
+        │                          # knowledge_triples, psyche_snapshots
         ├── core_memory.json
-        ├── history_summary.json
+        ├── essential_story.txt    # Layer 1 auto-summary (dream cycle)
         ├── llm.json
-        └── rules.json
+        ├── rules.json             # standing rules (substring triggers)
+        ├── commitments.json       # commitments (semantic topic triggers)
+        └── summaries/             # per-session history summaries
+            └── {session_id}.txt
 ```
 
 Shared:
@@ -111,10 +118,14 @@ Shared:
 
 Per relationship:
 
-- verbatim memory
-- extracted facts
-- core memory blocks
-- standing rules
+- verbatim memory (messages + facts)
+- observations + annotations (3-tier cost control)
+- knowledge triples (temporal knowledge graph)
+- core memory blocks ([human] + [relationship])
+- essential story (auto-summary, Layer 1)
+- psyche snapshots (personality trajectory)
+- standing rules (substring triggers)
+- commitments (topic triggers, cadence-gated)
 - optional per-user LLM override
 
 That asymmetry is intentional. Samantha is one self with many
@@ -127,8 +138,9 @@ Core companion tools live in `oasyce_samantha.tools`:
 - memory save / recall
 - core memory read / update
 - LLM configuration
-- standing rule CRUD
-- economic queries
+- standing rule CRUD (add / list / remove)
+- commitment CRUD (make / list / withdraw)
+- economic queries (balance / portfolio)
 
 Adapter-contributed tools live with their adapter implementation:
 
@@ -140,15 +152,24 @@ or schema details.
 
 ## Runtime flow
 
-Every stimulus still uses the same PGE pipeline:
+Every stimulus walks the same PGE pipeline through one of four
+cognitive modes (REACTIVE, PROACTIVE, OBSERVING, REFLECTING):
 
 ```text
-Stimulus → Perceive → Plan → Enrich → Generate → Evaluate → Deliver → Reflect
+Stimulus → Perceive → Plan → Enrich → Generate → World.act → Reflect
 ```
 
-What changed is ownership:
+Plan phase: SDK Planner (Psyche contract + Thronglets priors) runs first,
+then per-user standing rules layer on top, then commitments apply if any
+semantic topics match (via `_quick_annotate` zero-cost L0 annotation).
 
-- the companion core owns memory, planning, rules, dream, and sessions
+Delivery: `CompanionWorld.act` routes by mode — REACTIVE through channel,
+PROACTIVE through `deliver_proactive` with SILENCE filtering, OBSERVING
+and REFLECTING are no-ops (internal actions only).
+
+Ownership:
+
+- the companion core owns memory, planning, rules, commitments, streams, world, dream, and sessions
 - the surface adapter owns ingress, delivery channel construction, and
   world-specific enrichment/tooling
 

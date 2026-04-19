@@ -239,8 +239,9 @@ The most significant redesign. Informed by four reference systems:
 ├──────────────────────────────────────────────────────────────┤
 │ Procedural Memory                                            │
 │                                                              │
-│ Standing Rules (existing)                                     │
-│ Learned Patterns (NEW — what works for this person)           │
+│ Standing Rules (substring triggers, power user)               │
+│ Commitments (semantic topic triggers, relational)             │
+│ Learned Patterns (future — what works for this person)        │
 ├──────────────────────────────────────────────────────────────┤
 │ Collective Memory (Thronglets)                               │
 │                                                              │
@@ -571,9 +572,14 @@ def plan(self, stimulus, appraisal, context) -> Plan:
     plan = Plan(mode=mode)
     plan.contract = self.self.contract(plan.intent)
 
-    # User standing rules layer on top
+    # User standing rules layer on top (substring triggers)
     if stimulus.sender_id:
         session.rules.apply(stimulus, plan)
+
+    # Commitments: semantic topic triggers (annotator L0 vocabulary)
+    if stimulus.sender_id and len(session.commitments) > 0:
+        annotation = quick_annotate(stimulus)  # zero-cost keyword match
+        session.commitments.apply(stimulus, annotation, plan)
 
     return plan
 ```
@@ -755,13 +761,15 @@ oasyce-sdk (product-agnostic):
   World protocol
 
 oasyce-samantha (companion-specific):
-  Concrete Stream implementations (ChatStream, FeedStream, etc.)
+  Concrete Stream implementations (FeedStream, ReflectionStream, MaintenanceStream)
   Companion Self (constitution, drives, personality)
-  Companion Memory (SQLite FTS5 implementation, dream cycle)
-  Companion Loop (PGE pipeline with mode routing)
+  CompanionMemory (SQLite FTS5, 4-layer loading, dream cycle)
+  CompanionWorld (mode-aware delivery routing)
+  Annotation cost tiers (L0 keyword, L1 batch LLM, L2 deep)
   Surface adapters (App, Local, future worlds)
-  Standing rules system
-  Intention → Channel router
+  Standing rules system (substring triggers)
+  Commitment system (semantic topic triggers, cadence-gated)
+  Collective knowledge (Thronglets annotation sharing + Hebbian boost)
 ```
 
 ---
@@ -781,7 +789,8 @@ oasyce-samantha (companion-specific):
         │                          #       + psyche_snapshots (NEW)
         ├── core_memory.json       # [human] + [relationship] blocks
         ├── essential_story.txt    # Layer 1 auto-summary (NEW)
-        ├── rules.json             # standing rules
+        ├── rules.json             # standing rules (substring triggers)
+        ├── commitments.json       # commitments (topic triggers, cadence-gated)
         ├── llm.json               # per-user LLM override
         └── summaries/             # per-session history summaries
             └── {session_id}.txt
