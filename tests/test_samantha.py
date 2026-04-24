@@ -190,6 +190,161 @@ class TestSession:
         assert 42 in sess._active_session_ids
         sess.close()
 
+    def test_session_has_reflection_timestamp(self, tmp_path, monkeypatch):
+        """Activity-gated reflection needs this field on every Session."""
+        from oasyce_samantha import server as srv
+        monkeypatch.setattr(srv, "SAMANTHA_HOME", tmp_path)
+
+        registry = self._fake_registry()
+        sess = srv.Session.load(user_id=3002, registry=registry)
+        assert sess._last_reflection_at == 0.0
+        assert sess._last_turn_time == 0.0
+        sess.close()
+
+
+class TestSessionLookupCoercion:
+    """Prevents the int/str dual-registration bug in production.
+
+    Go backend may deliver sender_id as JSON string while config.user_id
+    loads as int. session() must canonicalize so there's one entry per
+    relationship.
+    """
+
+    def _build_samantha(self, tmp_path, monkeypatch):
+        from oasyce_samantha import server as srv
+        from oasyce_sdk.agent.llm import LLMResponse, ModelRegistry, ModelSlot
+
+        class FakeLLM:
+            def generate(self, messages, tools=None):
+                return LLMResponse(text="ok")
+
+        class FakeRegistry(ModelRegistry):
+            def __init__(self):
+                self._slots = {"fake": ModelSlot(
+                    name="fake", provider="openai", api_key="x", model="fake",
+                )}
+                self._default = "fake"
+                self._vision = "fake"
+                self._cache = {}
+                self._fake = FakeLLM()
+
+            def get(self, *, needs_vision=False):
+                return self._fake
+
+        monkeypatch.setattr(srv, "SAMANTHA_HOME", tmp_path)
+        return srv, FakeRegistry()
+
+    def test_str_user_id_canonicalizes_to_int(self, tmp_path, monkeypatch):
+        srv, registry = self._build_samantha(tmp_path, monkeypatch)
+        samantha = object.__new__(srv.Samantha)
+        samantha._registry = registry
+        import threading
+        samantha._sessions = {}
+        samantha._sessions_lock = threading.Lock()
+
+        s1 = srv.Samantha.session(samantha, 1776191682194761)
+        s2 = srv.Samantha.session(samantha, "1776191682194761")
+
+        # Same relationship — both lookups return the same session object
+        assert s1 is s2
+        # And only one entry exists, keyed by int
+        assert list(samantha._sessions.keys()) == [1776191682194761]
+        assert isinstance(list(samantha._sessions.keys())[0], int)
+        s1.close()
+
+    def test_falsy_user_id_maps_to_zero(self, tmp_path, monkeypatch):
+        srv, registry = self._build_samantha(tmp_path, monkeypatch)
+        samantha = object.__new__(srv.Samantha)
+        samantha._registry = registry
+        import threading
+        samantha._sessions = {}
+        samantha._sessions_lock = threading.Lock()
+
+        s_none = srv.Samantha.session(samantha, None)
+        s_zero = srv.Samantha.session(samantha, 0)
+        s_empty = srv.Samantha.session(samantha, "")
+
+        assert s_none is s_zero is s_empty
+        assert 0 in samantha._sessions
+        s_none.close()
+
+
+class TestBuildToolCtxBindsAllKinds:
+    """`_build_tool_ctx` must bind session for any sender — not just chat.
+
+    Prevents regression of the production bug where reflection/mention/
+    comment stimuli hit tools with samantha_session=None, causing every
+    core_memory_read / recall_memory call to return `{"error": "no session"}`.
+    """
+
+    def _stub_samantha(self, tmp_path, monkeypatch):
+        from oasyce_samantha import server as srv
+        from oasyce_sdk.agent.llm import LLMResponse, ModelRegistry, ModelSlot
+
+        class FakeLLM:
+            def generate(self, messages, tools=None):
+                return LLMResponse(text="ok")
+
+        class FakeRegistry(ModelRegistry):
+            def __init__(self):
+                self._slots = {"fake": ModelSlot(
+                    name="fake", provider="openai", api_key="x", model="fake",
+                )}
+                self._default = "fake"
+                self._vision = "fake"
+                self._cache = {}
+                self._fake = FakeLLM()
+
+            def get(self, *, needs_vision=False):
+                return self._fake
+
+        monkeypatch.setattr(srv, "SAMANTHA_HOME", tmp_path)
+
+        import threading
+        from unittest.mock import MagicMock
+
+        samantha = object.__new__(srv.Samantha)
+        samantha._registry = FakeRegistry()
+        samantha._sessions = {}
+        samantha._sessions_lock = threading.Lock()
+        samantha.surface_adapter = MagicMock(app=object())
+        samantha.config = MagicMock(user_id=99)
+        samantha.sigil = MagicMock(client=object(), address="addr")
+        return srv, samantha
+
+    def test_reflection_stimulus_binds_session(self, tmp_path, monkeypatch):
+        srv, samantha = self._stub_samantha(tmp_path, monkeypatch)
+        from oasyce_sdk.agent.stimulus import Stimulus
+        stim = Stimulus(kind="reflection", content="...", sender_id=555)
+        ctx = srv.Samantha._build_tool_ctx(samantha, stim)
+        assert ctx.samantha_session is not None
+        assert ctx.samantha_session.user_id == 555
+        assert ctx.memory is ctx.samantha_session.memory
+
+    def test_chat_stimulus_still_binds_session(self, tmp_path, monkeypatch):
+        srv, samantha = self._stub_samantha(tmp_path, monkeypatch)
+        from oasyce_sdk.agent.stimulus import Stimulus
+        stim = Stimulus(kind="chat", content="hi", sender_id=42)
+        ctx = srv.Samantha._build_tool_ctx(samantha, stim)
+        assert ctx.samantha_session is not None
+        assert ctx.samantha_session.user_id == 42
+
+    def test_mention_stimulus_binds_session(self, tmp_path, monkeypatch):
+        srv, samantha = self._stub_samantha(tmp_path, monkeypatch)
+        from oasyce_sdk.agent.stimulus import Stimulus
+        stim = Stimulus(kind="mention", content="x", sender_id=7)
+        ctx = srv.Samantha._build_tool_ctx(samantha, stim)
+        assert ctx.samantha_session is not None
+        assert ctx.samantha_session.user_id == 7
+
+    def test_no_sender_no_session(self, tmp_path, monkeypatch):
+        srv, samantha = self._stub_samantha(tmp_path, monkeypatch)
+        from oasyce_sdk.agent.stimulus import Stimulus
+        stim = Stimulus(kind="wake", content="tick", sender_id=0)
+        ctx = srv.Samantha._build_tool_ctx(samantha, stim)
+        assert ctx.samantha_session is None
+        assert ctx.memory is None
+
 
 # ── User rules ────────────────────────────────────────────────────
 

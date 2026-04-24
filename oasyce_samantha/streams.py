@@ -12,6 +12,7 @@ and routes returned Stimuli through the unified pipeline.
 from __future__ import annotations
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -23,6 +24,10 @@ if TYPE_CHECKING:
     from .server import Samantha, Session
 
 logger = logging.getLogger(__name__)
+
+# Activity-gated reflection thresholds. See ReflectionStream._should_reflect.
+_MAX_USER_IDLE_SEC = 3600.0     # stop reflecting after user is silent >1h
+_MIN_REFLECT_GAP_SEC = 1800.0   # at most one reflection per 30min per session
 
 
 class FeedStream:
@@ -81,12 +86,29 @@ class ReflectionStream:
         if not self._runtime.surface_capabilities.chat:
             return []
 
+        now = time.monotonic()
         stimuli: list[Stimulus] = []
         for user_id, sess in list(self._runtime._sessions.items()):
+            if not self._should_reflect(sess, now):
+                continue
             stimulus = self._build_reflection_stimulus(user_id, sess)
             if stimulus is not None:
+                sess._last_reflection_at = now
                 stimuli.append(stimulus)
         return stimuli
+
+    @staticmethod
+    def _should_reflect(sess: "Session", now: float) -> bool:
+        # Joi only thinks about users who are present. No real chat turn
+        # yet → nothing to reflect on. User silent too long → the moment
+        # has passed. Recently reflected → respect the minimum interval.
+        if sess._last_turn_time == 0.0:
+            return False
+        if now - sess._last_turn_time > _MAX_USER_IDLE_SEC:
+            return False
+        if now - sess._last_reflection_at < _MIN_REFLECT_GAP_SEC:
+            return False
+        return True
 
     def _build_reflection_stimulus(
         self, user_id: int, sess: "Session",

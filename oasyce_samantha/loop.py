@@ -44,7 +44,10 @@ def cognitive_loop(samantha: "Samantha", base_interval: int = 300) -> None:
     adapter_streams = samantha.surface_adapter.contribute_streams(samantha)
     streams.extend(adapter_streams)
 
-    streams.append(ReflectionStream(samantha, interval=base_interval * 3))
+    # ReflectionStream's poll() is cheap and gates per-session via
+    # activity state; a 5-minute tick is responsive enough to catch
+    # a freshly-active user without hammering the CPU.
+    streams.append(ReflectionStream(samantha, interval=300))
     streams.append(MaintenanceStream(samantha, interval=base_interval * 10))
 
     last_poll: dict[int, float] = {id(s): 0.0 for s in streams}

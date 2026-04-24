@@ -121,13 +121,17 @@ class TestFeedStream:
 
 class TestReflectionStream:
     @staticmethod
-    def _mock_session():
+    def _mock_session(*, active: bool = True, recently_reflected: bool = False):
+        import time as _time
         sess = MagicMock()
         sess.core_memory.get = MagicMock(side_effect=lambda k: {
             "human": "Alice, loves tea",
             "relationship": "close friend",
         }.get(k, ""))
         sess.drain_active_sessions = MagicMock(return_value=[101])
+        # Activity-gate inputs: default to "active user, never reflected".
+        sess._last_turn_time = _time.monotonic() if active else 0.0
+        sess._last_reflection_at = _time.monotonic() if recently_reflected else 0.0
         return sess
 
     def test_poll_produces_reflection_stimuli(self):
@@ -191,6 +195,52 @@ class TestReflectionStream:
         rs = ReflectionStream(runtime, interval=900)
         result = rs.poll()
         assert result[0].metadata.get("mood") == "thoughtful"
+
+    def test_poll_skips_sessions_that_never_chatted(self):
+        from oasyce_samantha.streams import ReflectionStream
+
+        runtime = MagicMock()
+        runtime.surface_capabilities.chat = True
+        runtime._sessions = {1: self._mock_session(active=False)}
+
+        rs = ReflectionStream(runtime, interval=900)
+        assert rs.poll() == []
+
+    def test_poll_skips_recently_reflected_sessions(self):
+        from oasyce_samantha.streams import ReflectionStream
+
+        runtime = MagicMock()
+        runtime.surface_capabilities.chat = True
+        runtime._sessions = {1: self._mock_session(recently_reflected=True)}
+
+        rs = ReflectionStream(runtime, interval=900)
+        assert rs.poll() == []
+
+    def test_poll_skips_long_idle_users(self):
+        from oasyce_samantha.streams import ReflectionStream
+
+        sess = self._mock_session()
+        # Simulate last turn happened 2 hours ago (past _MAX_USER_IDLE_SEC)
+        sess._last_turn_time -= 7200
+        runtime = MagicMock()
+        runtime.surface_capabilities.chat = True
+        runtime._sessions = {1: sess}
+
+        rs = ReflectionStream(runtime, interval=900)
+        assert rs.poll() == []
+
+    def test_poll_records_reflection_timestamp(self):
+        from oasyce_samantha.streams import ReflectionStream
+
+        sess = self._mock_session()
+        original_ts = sess._last_reflection_at
+        runtime = MagicMock()
+        runtime.surface_capabilities.chat = True
+        runtime._sessions = {1: sess}
+
+        rs = ReflectionStream(runtime, interval=900)
+        rs.poll()
+        assert sess._last_reflection_at > original_ts
 
 
 # ── MaintenanceStream ────────────────────────────────────────

@@ -134,6 +134,7 @@ class Session:
         self._turn_count: int = 0
         self._estimated_tokens: int = 0
         self._last_turn_time: float = 0.0
+        self._last_reflection_at: float = 0.0
 
         self.rules: RuleSet = load_rules(workspace)
         self.commitments: CommitmentSet = load_commitments(workspace)
@@ -319,7 +320,10 @@ class Samantha(Agent):
             self.surface_capabilities,
         )
 
-    def session(self, user_id: int) -> Session:
+    def session(self, user_id) -> Session:
+        # Canonical type normalization — webhooks may deliver sender_id as str,
+        # config.user_id arrives as int. One int key per relationship.
+        user_id = int(user_id) if user_id else 0
         with self._sessions_lock:
             if user_id not in self._sessions:
                 self._sessions[user_id] = Session.load(user_id, self._registry)
@@ -822,14 +826,13 @@ class Samantha(Agent):
         return self._registry.get(needs_vision=needs_vision)
 
     def _build_tool_ctx(self, stimulus: Stimulus) -> ToolContext:
-        memory = None
-        sess = None
-        if stimulus.kind == "chat" and stimulus.sender_id:
-            sess = self.session(stimulus.sender_id)
-            memory = sess.memory
+        # Any stimulus with a sender is about a specific relationship and must
+        # bind that session — chat, mention, comment, reflection all need
+        # access to core_memory / recall_memory tools.
+        sess = self.session(stimulus.sender_id) if stimulus.sender_id else None
         return ToolContext(
             app=getattr(self.surface_adapter, "app", None),
-            memory=memory,
+            memory=sess.memory if sess else None,
             user_id=self.config.user_id,
             chain_client=self.sigil.client,
             chain_address=self.sigil.address,
